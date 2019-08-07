@@ -31,17 +31,19 @@ try:
 except ImportError:
     from io import StringIO
 
+HAS_LZMA_MODULE = True
 try:
     import lzma
 except ImportError:
-    HAS_LZMA_MODULE = False
-else:
-    HAS_LZMA_MODULE = True
+    try:
+        import backports.lzma as lzma
+    except ImportError:
+        HAS_LZMA_MODULE = False
 
 
-RPM_MAGIC  = b'\xed\xab\xee\xdb'
+RPM_MAGIC = b'\xed\xab\xee\xdb'
 GZIP_MAGIC = b'\x1f\x8b'
-XZ_MAGIC   = b'\xfd7zXZ\x00'
+XZ_MAGIC = b'\xfd7zXZ\x00'
 
 
 def gzip_decompress(data):
@@ -49,6 +51,7 @@ def gzip_decompress(data):
     gzipper = gzip.GzipFile(fileobj=gzstream)
     data = gzipper.read()
     return data
+
 
 def xz_decompress(data):
     if HAS_LZMA_MODULE:
@@ -58,6 +61,29 @@ def xz_decompress(data):
                             stdout=subprocess.PIPE)
     data = unxz.communicate(input=data)[0]
     return data
+
+
+def is_rpm(reader):
+    lead = reader.read(96)
+    return lead[0:4] == RPM_MAGIC
+
+
+def extract_cpio(reader):
+    data = reader.read()
+    decompress = None
+    idx = data.find(XZ_MAGIC)
+    if idx != -1:
+        decompress = xz_decompress
+        pos = idx
+    idx = data.find(GZIP_MAGIC)
+    if idx != -1 and decompress is None:
+        decompress = gzip_decompress
+        pos = idx
+    if decompress is None:
+        return None
+    data = decompress(data[pos:])
+    return data
+
 
 def rpm2cpio(stream_in=None, stream_out=None):
     if stream_in is None:
@@ -70,35 +96,43 @@ def rpm2cpio(stream_in=None, stream_out=None):
     except AttributeError:
         reader = stream_in
         writer = stream_out
-    lead = reader.read(96)
-    if lead[0:4] != RPM_MAGIC:
+    if not is_rpm(reader):
         raise IOError('the input is not a RPM package')
-    data = reader.read()
-    decompress = None
-    idx = data.find(XZ_MAGIC)
-    if idx != -1:
-        decompress = xz_decompress
-        pos = idx
-    idx = data.find(GZIP_MAGIC)
-    if idx != -1 and decompress is None:
-        decompress = gzip_decompress
-        pos = idx
-    if decompress is None:
+    cpio = extract_cpio(reader)
+    if cpio is None:
         raise IOError('could not find compressed cpio archive')
-    data = decompress(data[pos:])
-    writer.write(data)
+    writer.write(cpio)
 
 
-if __name__ == '__main__':
-    if sys.argv[1:]:
+def main(args=None):
+    if args is None:
+        args = sys.argv
+    if args[1:]:
         try:
-            fin = open(sys.argv[1])
+            fin = open(args[1])
             rpm2cpio(fin)
             fin.close()
         except IOError as e:
-            print('Error:', sys.argv[1], e)
+            print('Error:', args[1], e)
+            sys.exit(1)
+        except OSError as e:
+            print('Error: could not find lzma extractor')
+            print("Please, install Python's lzma module or the xz utility")
+            sys.exit(1)
     else:
         try:
             rpm2cpio()
         except IOError as e:
             print('Error:', e)
+            sys.exit(1)
+        except OSError as e:
+            print('Error: could not find lzma extractor')
+            print("Please install Python's lzma module or the xz utility")
+            sys.exit(1)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('Interrupted!')
